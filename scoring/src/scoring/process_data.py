@@ -100,7 +100,15 @@ def tsv_parser(
         usecols=useCols,
         chunksize=chunkSize,
       )
-      data = pd.concat(textParser, ignore_index=True)
+      chunks = list(textParser)
+      # Avoid "dtype of categories must be the same" when concatenating chunked reads.
+      if chunks and hasattr(mapping, "items"):
+        cat_cols = [k for k, v in mapping.items() if v == "category" and k in chunks[0].columns]
+        for ch in chunks:
+          for col in cat_cols:
+            if col in ch.columns and ch[col].dtype.name == "category":
+              ch[col] = ch[col].astype(object)
+      data = pd.concat(chunks, ignore_index=True)
     else:
       data = pd.read_csv(
         StringIO(rawTSV),
@@ -145,6 +153,23 @@ def tsv_reader_single(
     return tsv_parser(handle.read(), mapping, columns, header, convertNAToNone=convertNAToNone)
 
 
+def _mapping_for_read(mapping) -> Dict:
+  """Use object instead of category for reading to avoid union_categoricals failures."""
+  if not hasattr(mapping, "items"):
+    return mapping
+  return {k: (object if v == "category" else v) for k, v in mapping.items()}
+
+
+def _to_category(df: pd.DataFrame, mapping) -> pd.DataFrame:
+  """Convert columns that should be category back to category after read."""
+  if df is None or not hasattr(mapping, "items"):
+    return df
+  for col in df.columns:
+    if col in mapping and mapping[col] == "category":
+      df[col] = df[col].astype("category")
+  return df
+
+
 def tsv_reader(
   path: str, mapping, columns, header=False, parser=tsv_parser, convertNAToNone=True
 ) -> pd.DataFrame:
@@ -162,6 +187,13 @@ def tsv_reader(
       for filename in os.listdir(path)
       if filename.endswith(".tsv")
     ]
+    # Avoid "dtype of categories must be the same" when concatenating multiple files.
+    if dfs and hasattr(mapping, "items"):
+      cat_cols = [k for k, v in mapping.items() if v == "category" and k in dfs[0].columns]
+      for df in dfs:
+        for col in cat_cols:
+          if col in df.columns and df[col].dtype.name == "category":
+            df[col] = df[col].astype(object)
     return pd.concat(dfs, ignore_index=True)
   else:
     return tsv_reader_single(
@@ -192,11 +224,12 @@ def read_from_tsv(
   else:
     notes = tsv_reader(
       notesPath,
-      c.noteTSVTypeMapping,
+      _mapping_for_read(c.noteTSVTypeMapping),
       c.noteTSVColumns,
       header=headers,
       convertNAToNone=False,
     )
+    notes = _to_category(notes, c.noteTSVTypeMapping)
     assert len(notes.columns) == len(c.noteTSVColumns) and all(notes.columns == c.noteTSVColumns), (
       f"note columns don't match: \n{[col for col in notes.columns if not col in c.noteTSVColumns]} are extra columns, "
       + f"\n{[col for col in c.noteTSVColumns if not col in notes.columns]} are missing."
@@ -207,11 +240,12 @@ def read_from_tsv(
   else:
     ratings = tsv_reader(
       ratingsPath,
-      c.ratingTSVTypeMapping,
+      _mapping_for_read(c.ratingTSVTypeMapping),
       c.ratingTSVColumns,
       header=headers,
       convertNAToNone=False,
     )
+    ratings = _to_category(ratings, c.ratingTSVTypeMapping)
 
     # Keep the on-disk schema strict (33 cols), but add a runtime helper column for prescoring
     if "correlatedRater" not in ratings.columns:
@@ -232,11 +266,12 @@ def read_from_tsv(
     try:
       noteStatusHistory = tsv_reader(
         noteStatusHistoryPath,
-        c.noteStatusHistoryTSVTypeMapping,
+        _mapping_for_read(c.noteStatusHistoryTSVTypeMapping),
         c.noteStatusHistoryTSVColumns,
         header=headers,
         convertNAToNone=False,
       )
+      noteStatusHistory = _to_category(noteStatusHistory, c.noteStatusHistoryTSVTypeMapping)
       assert len(noteStatusHistory.columns.values) == len(c.noteStatusHistoryTSVColumns) and all(
         noteStatusHistory.columns == c.noteStatusHistoryTSVColumns
       ), (
@@ -246,11 +281,12 @@ def read_from_tsv(
     except ValueError:
       noteStatusHistory = tsv_reader(
         noteStatusHistoryPath,
-        c.noteStatusHistoryTSVTypeMappingOld,
+        _mapping_for_read(c.noteStatusHistoryTSVTypeMappingOld),
         c.noteStatusHistoryTSVColumnsOld,
         header=headers,
         convertNAToNone=False,
       )
+      noteStatusHistory = _to_category(noteStatusHistory, c.noteStatusHistoryTSVTypeMapping)
       noteStatusHistory[c.timestampMillisOfFirstNmrDueToMinStableCrhTimeKey] = np.nan
       assert len(noteStatusHistory.columns.values) == len(c.noteStatusHistoryTSVColumns) and all(
         noteStatusHistory.columns == c.noteStatusHistoryTSVColumns
@@ -264,11 +300,12 @@ def read_from_tsv(
   else:
     userEnrollment = tsv_reader(
       userEnrollmentPath,
-      c.userEnrollmentTSVTypeMapping,
+      _mapping_for_read(c.userEnrollmentTSVTypeMapping),
       c.userEnrollmentTSVColumns,
       header=headers,
       convertNAToNone=False,
     )
+    userEnrollment = _to_category(userEnrollment, c.userEnrollmentTSVTypeMapping)
     assert len(userEnrollment.columns.values) == len(c.userEnrollmentTSVColumns) and all(
       userEnrollment.columns == c.userEnrollmentTSVColumns
     ), (
